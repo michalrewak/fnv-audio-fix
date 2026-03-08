@@ -11,6 +11,7 @@ from .fixer import (
     SOUND_BSA_NAMES,
     phase1_loose_mp3,
     phase2_bsa_ogg,
+    phase3_patch_ini,
     rollback,
     save_manifest,
     should_skip_bsa,
@@ -163,6 +164,7 @@ def main(argv=None):
     print(f"\nPlan:")
     print(f"  Phase 1: Convert {total_mp3} loose MP3 files -> WAV")
     print(f"  Phase 2: Extract {total_ogg_in_bsa} OGG files from BSAs -> WAV")
+    print(f"  Phase 3: Patch INI files (music .mp3 -> .wav references)")
     print(f"  Backups: {backup_root}")
     if args.dry_run:
         print("  *** DRY RUN — no changes will be made ***")
@@ -180,6 +182,7 @@ def main(argv=None):
                            args.dry_run)
     p2 = phase2_bsa_ogg(game_data_dir, logger, backup_root, changes,
                           args.dry_run)
+    p3 = phase3_patch_ini(logger, backup_root, changes, args.dry_run)
 
     if not args.dry_run and changes:
         save_manifest(backup_root, changes, game_data_dir, logger)
@@ -192,6 +195,8 @@ def main(argv=None):
                f"{p1['failed']} failed, {p1['skipped']} skipped")
     logger.log(f"Phase 2 (BSA OGG -> WAV): {p2['converted']} extracted, "
                f"{p2['failed']} failed, {p2['skipped']} skipped")
+    logger.log(f"Phase 3 (INI patch): {p3['patched']} patched, "
+               f"{p3['skipped']} skipped")
     logger.log(f"Total changes: {len(changes)}")
 
     total_failures = p1["failed"] + p2["failed"]
