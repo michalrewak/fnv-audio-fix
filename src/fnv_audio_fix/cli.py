@@ -6,16 +6,12 @@ from datetime import datetime
 from pathlib import Path
 
 from . import __version__
-from .converter import check_ffmpeg
 from .fixer import (
-    SOUND_BSA_NAMES,
-    phase1_loose_mp3,
-    phase2_bsa_ogg,
+    AUDIO_SETTINGS,
+    fix_audio_ini,
     rollback,
     save_manifest,
-    should_skip_bsa,
 )
-from .bsa import read_bsa_file_list
 from .game_path import find_game_data_dir
 from .logger import Logger
 
@@ -27,7 +23,7 @@ BANNER = r"""
  |_|   |_| \_|  \_/  /_/   \_\__,_|\__,_|_|\___/  |_|   |_/_/\_\
 
   Fallout: New Vegas Audio Crackling Fix  v{}
-  Converts MP3/OGG -> 16-bit PCM WAV
+  Patches INI audio settings (Viva New Vegas recommended)
 """.format(__version__)
 
 
@@ -35,8 +31,8 @@ def _build_parser():
     parser = argparse.ArgumentParser(
         prog="fnv-audio-fix",
         description=(
-            "Fix audio crackling in Fallout: New Vegas by converting "
-            "MP3 and OGG audio files to 16-bit PCM WAV."
+            "Fix audio crackling in Fallout: New Vegas by patching "
+            "INI audio buffer settings (Viva New Vegas recommended fix)."
         ),
     )
     parser.add_argument(
@@ -93,13 +89,6 @@ def main(argv=None):
         logger.close()
         sys.exit(0 if ok else 1)
 
-    # Verify FFmpeg
-    if not check_ffmpeg():
-        print("ERROR: FFmpeg not found in PATH!")
-        print("Install it:  winget install Gyan.FFmpeg")
-        print("Or download: https://www.gyan.dev/ffmpeg/builds/")
-        sys.exit(1)
-
     # Prepare backup directory
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     backup_root = backup_dir / timestamp
@@ -112,73 +101,28 @@ def main(argv=None):
     logger.log(f"Game Data: {game_data_dir}")
     logger.log(f"Backup:    {backup_root}")
     if args.dry_run:
-        logger.log("*** DRY RUN MODE — no files will be modified ***")
+        logger.log("*** DRY RUN MODE - no files will be modified ***")
 
-    # Scan
-    mp3_songs = (
-        sorted((game_data_dir / "Sound" / "Songs").rglob("*.mp3"))
-        if (game_data_dir / "Sound" / "Songs").exists()
-        else []
-    )
-    mp3_music = (
-        sorted((game_data_dir / "Music").rglob("*.mp3"))
-        if (game_data_dir / "Music").exists()
-        else []
-    )
-    bsa_files = sorted(game_data_dir.glob("*.bsa"))
-
-    logger.log(f"\nFound:")
-    logger.log(f"  {len(mp3_songs)} loose MP3 radio songs")
-    logger.log(f"  {len(mp3_music)} loose MP3 music tracks")
-    logger.log(f"  {len(bsa_files)} BSA archives")
-
-    total_ogg_in_bsa = 0
-    for bsa_path in bsa_files:
-        skip = should_skip_bsa(bsa_path.name)
-        is_sound = bsa_path.name in SOUND_BSA_NAMES
-        file_list = (
-            read_bsa_file_list(bsa_path) if (not skip and is_sound) else None
-        )
-        ogg = sum(
-            1 for f in (file_list or []) if f["name"].lower().endswith(".ogg")
-        )
-        mp3 = sum(
-            1 for f in (file_list or []) if f["name"].lower().endswith(".mp3")
-        )
-        audio_note = f" ({ogg} OGG, {mp3} MP3)" if ogg + mp3 > 0 else ""
-        skip_note = (
-            " [SKIP - mod audio]"
-            if skip
-            else (" [SKIP - not Sound BSA]" if not is_sound else "")
-        )
-        size_mb = bsa_path.stat().st_size / 1024 / 1024
-        logger.log(
-            f"    {bsa_path.name:45s} {size_mb:7.1f} MB{audio_note}{skip_note}"
-        )
-        if not skip and is_sound:
-            total_ogg_in_bsa += ogg
-
-    total_mp3 = len(mp3_songs) + len(mp3_music)
-
+    # Show plan
     print(f"\nPlan:")
-    print(f"  Phase 1: Convert {total_mp3} loose MP3 files (keep .mp3 extension)")
-    print(f"  Phase 2: Extract {total_ogg_in_bsa} OGG files from BSAs (keep .ogg extension)")
+    print(f"  Patch audio INI settings to fix crackling:")
+    for k, v in AUDIO_SETTINGS.items():
+        print(f"    {k} = {v}")
+    print(f"  Files: Fallout_default.ini, Fallout.ini, FalloutPrefs.ini")
     print(f"  Backups: {backup_root}")
     if args.dry_run:
-        print("  *** DRY RUN — no changes will be made ***")
+        print("  *** DRY RUN - no changes will be made ***")
     print()
 
-    if not args.yes:
+    if not args.yes and not args.dry_run:
         response = input("Proceed? [y/N] ").strip().lower()
         if response != "y":
             print("Aborted.")
             logger.close()
             sys.exit(0)
 
-    # Run
-    p1 = phase1_loose_mp3(game_data_dir, logger, backup_root, changes,
-                           args.dry_run)
-    p2 = phase2_bsa_ogg(game_data_dir, logger, backup_root, changes,
+    # Run INI patching
+    stats = fix_audio_ini(game_data_dir, logger, backup_root, changes,
                           args.dry_run)
 
     if not args.dry_run and changes:
@@ -188,23 +132,14 @@ def main(argv=None):
     logger.log("\n" + "=" * 60)
     logger.log("SUMMARY")
     logger.log("=" * 60)
-    logger.log(f"Phase 1 (MP3 -> WAV content): {p1['converted']} converted, "
-               f"{p1['failed']} failed, {p1['skipped']} skipped")
-    logger.log(f"Phase 2 (BSA -> loose WAV): {p2['converted']} extracted, "
-               f"{p2['failed']} failed, {p2['skipped']} skipped")
-    logger.log(f"Total changes: {len(changes)}")
+    logger.log(f"INI files patched: {stats['patched']}")
+    logger.log(f"INI files unchanged: {stats['skipped']}")
 
-    total_failures = p1["failed"] + p2["failed"]
-    if total_failures > 0:
-        logger.log(
-            f"\nWARNING: {total_failures} operations failed! Check log.",
-            "WARN",
-        )
-
-    logger.log(f"\nBackup: {backup_root}")
+    if changes:
+        logger.log(f"\nBackup: {backup_root}")
     logger.log(f"Log:    {log_file}")
     logger.log("To undo: fnv-audio-fix --rollback")
-    logger.log("Done! Launch the game and test the radio.")
+    logger.log("\nDone! Launch the game and test the audio.")
     logger.close()
 
 

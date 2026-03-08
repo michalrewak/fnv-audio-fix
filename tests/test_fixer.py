@@ -1,33 +1,61 @@
-"""Tests for the fixer module (phases, rollback, manifest)."""
+"""Tests for the fixer module (INI patching, rollback, manifest)."""
 
 import json
+import os
+import stat
 from pathlib import Path
-from unittest.mock import patch, MagicMock
 
 import pytest
 
 from fnv_audio_fix.fixer import (
-    should_skip_bsa,
+    AUDIO_SETTINGS,
+    _patch_ini_content,
+    fix_audio_ini,
     save_manifest,
-    phase1_loose_mp3,
     rollback,
-    SOUND_BSA_NAMES,
 )
 from fnv_audio_fix.logger import Logger
 
 
-class TestShouldSkipBsa:
-    def test_skip_polish_voices(self):
-        assert should_skip_bsa("Voices_pl.bsa") is True
+class TestPatchIniContent:
+    def test_patches_existing_settings(self):
+        content = "[Audio]\niAudioCacheSize=2048\nbMultiThreadAudio=0\n"
+        new_content, changed = _patch_ini_content(content, AUDIO_SETTINGS)
+        assert "iAudioCacheSize=16384" in new_content
+        assert "bMultiThreadAudio=1" in new_content
+        assert "iAudioCacheSize" in changed
+        assert changed["iAudioCacheSize"] == ("2048", "16384")
 
-    def test_skip_voxalter(self):
-        assert should_skip_bsa("Voxalter_dub.bsa") is True
+    def test_no_change_if_already_correct(self):
+        content = (
+            "[Audio]\n"
+            "iAudioCacheSize=16384\n"
+            "iMaxSizeForCachedSound=2048\n"
+            "bMultiThreadAudio=1\n"
+            "bUseAudioDebugInformation=0\n"
+        )
+        new_content, changed = _patch_ini_content(content, AUDIO_SETTINGS)
+        assert changed == {}
+        assert new_content == content
 
-    def test_no_skip_sound(self):
-        assert should_skip_bsa("Fallout - Sound.bsa") is False
+    def test_case_insensitive_key(self):
+        content = "[Audio]\nIAUDIOCACHESIZE=1024\n"
+        new_content, changed = _patch_ini_content(
+            content, {"iAudioCacheSize": "16384"}
+        )
+        assert "IAUDIOCACHESIZE=16384" in new_content
+        assert "iAudioCacheSize" in changed
 
-    def test_case_insensitive(self):
-        assert should_skip_bsa("VOICES_PL.BSA") is True
+    def test_preserves_other_settings(self):
+        content = (
+            "[Audio]\n"
+            "iAudioCacheSize=2048\n"
+            "fSomethingElse=1.5\n"
+        )
+        new_content, changed = _patch_ini_content(
+            content, {"iAudioCacheSize": "16384"}
+        )
+        assert "fSomethingElse=1.5" in new_content
 
 
 class TestSaveManifest:
@@ -35,7 +63,7 @@ class TestSaveManifest:
         backup_root = tmp_path / "backup"
         backup_root.mkdir()
         logger = Logger()
-        changes = [{"type": "mp3_to_wav", "original": "test.mp3"}]
+        changes = [{"type": "ini_patch", "file": "test.ini"}]
 
         save_manifest(backup_root, changes, tmp_path, logger)
 
@@ -46,70 +74,109 @@ class TestSaveManifest:
         assert "timestamp" in data
 
 
-class TestPhase1DryRun:
-    def test_dry_run_counts_mp3(self, tmp_path):
-        """Dry run should count MP3 files without converting them."""
+class TestFixAudioIni:
+    def test_patches_default_ini(self, tmp_path):
+        """Should patch Fallout_default.ini in game root."""
         data_dir = tmp_path / "Data"
-        music = data_dir / "Music"
-        music.mkdir(parents=True)
+        data_dir.mkdir()
 
-        # Create fake MP3 files
-        (music / "song1.mp3").write_bytes(b"fake mp3 1")
-        (music / "song2.mp3").write_bytes(b"fake mp3 2")
+        default_ini = tmp_path / "Fallout_default.ini"
+        default_ini.write_text(
+            "[Audio]\niAudioCacheSize=2048\nbMultiThreadAudio=0\n"
+            "bUseAudioDebugInformation=1\niMaxSizeForCachedSound=256\n",
+            encoding="utf-8",
+        )
 
+        backup = tmp_path / "backup"
+        backup.mkdir()
         logger = Logger()
         changes = []
-        backup = tmp_path / "backup"
 
-        stats = phase1_loose_mp3(data_dir, logger, backup, changes,
-                                  dry_run=True)
+        stats = fix_audio_ini(data_dir, logger, backup, changes)
 
-        assert stats["converted"] == 2
-        assert stats["failed"] == 0
-        # Original files should still exist
-        assert (music / "song1.mp3").exists()
-        assert (music / "song2.mp3").exists()
+        content = default_ini.read_text(encoding="utf-8")
+        assert "iAudioCacheSize=16384" in content
+        assert "bMultiThreadAudio=1" in content
+        assert stats["patched"] >= 1
 
-    def test_skips_already_converted(self, tmp_path):
+    def test_dry_run_no_changes(self, tmp_path):
+        """Dry run should not modify files."""
         data_dir = tmp_path / "Data"
-        music = data_dir / "Music"
-        music.mkdir(parents=True)
+        data_dir.mkdir()
 
-        # File with RIFF header = already converted to WAV content
-        (music / "song.mp3").write_bytes(b"RIFF" + b"\x00" * 40)
+        default_ini = tmp_path / "Fallout_default.ini"
+        original = "[Audio]\niAudioCacheSize=2048\n"
+        default_ini.write_text(original, encoding="utf-8")
 
+        backup = tmp_path / "backup"
         logger = Logger()
-        stats = phase1_loose_mp3(data_dir, logger, tmp_path, [],
-                                  dry_run=True)
-        assert stats["skipped"] == 1
-        assert stats["converted"] == 0
+        changes = []
+
+        fix_audio_ini(data_dir, logger, backup, changes, dry_run=True)
+
+        assert default_ini.read_text(encoding="utf-8") == original
+        assert len(changes) == 0
+
+    def test_handles_readonly_ini(self, tmp_path):
+        """Should handle read-only INI files."""
+        data_dir = tmp_path / "Data"
+        data_dir.mkdir()
+
+        default_ini = tmp_path / "Fallout_default.ini"
+        default_ini.write_text(
+            "[Audio]\niAudioCacheSize=2048\n", encoding="utf-8"
+        )
+        # Make read-only
+        default_ini.chmod(default_ini.stat().st_mode & ~stat.S_IWRITE)
+
+        backup = tmp_path / "backup"
+        backup.mkdir()
+        logger = Logger()
+        changes = []
+
+        stats = fix_audio_ini(data_dir, logger, backup, changes)
+
+        content = default_ini.read_text(encoding="utf-8")
+        assert "iAudioCacheSize=16384" in content
+        assert stats["patched"] >= 1
+
+    def test_skips_missing_ini(self, tmp_path):
+        """Should skip non-existent INI files without error."""
+        data_dir = tmp_path / "Data"
+        data_dir.mkdir()
+        # No Fallout_default.ini exists
+
+        backup = tmp_path / "backup"
+        logger = Logger()
+        changes = []
+
+        stats = fix_audio_ini(data_dir, logger, backup, changes)
+        assert stats["skipped"] >= 1
 
 
 class TestRollback:
-    def test_rollback_mp3_rewrite(self, tmp_path):
-        """Rollback should restore original MP3 content from backup."""
+    def test_rollback_restores_ini(self, tmp_path):
+        """Rollback should restore original INI from backup."""
         data_dir = tmp_path / "game" / "Data"
         data_dir.mkdir(parents=True)
         backup_dir = tmp_path / "backup"
         ts_dir = backup_dir / "20260101_120000"
         ts_dir.mkdir(parents=True)
 
-        # Simulate: original MP3 was backed up, file now has WAV content
-        mp3_file = data_dir / "Music" / "song.mp3"
-        mp3_file.parent.mkdir(parents=True)
-        mp3_file.write_bytes(b"RIFF wav content")
+        ini_file = tmp_path / "game" / "Fallout_default.ini"
+        ini_file.write_text("patched content", encoding="utf-8")
 
-        mp3_backup = ts_dir / "song.mp3"
-        mp3_backup.write_bytes(b"original mp3")
+        ini_backup = ts_dir / "Fallout_default.ini"
+        ini_backup.write_text("original content", encoding="utf-8")
 
         manifest = {
             "timestamp": "2026-01-01T12:00:00",
             "game_data_dir": str(data_dir),
             "changes": [
                 {
-                    "type": "mp3_rewrite",
-                    "file": str(mp3_file),
-                    "backup": str(mp3_backup),
+                    "type": "ini_patch",
+                    "file": str(ini_file),
+                    "backup": str(ini_backup),
                 }
             ],
         }
@@ -121,50 +188,18 @@ class TestRollback:
         ok = rollback(backup_dir, data_dir, logger)
 
         assert ok is True
-        assert mp3_file.exists()
-        assert mp3_file.read_bytes() == b"original mp3"
-
-    def test_rollback_legacy_mp3_to_wav(self, tmp_path):
-        """Rollback should handle legacy v1 manifest format."""
-        data_dir = tmp_path / "game" / "Data"
-        data_dir.mkdir(parents=True)
-        backup_dir = tmp_path / "backup"
-        ts_dir = backup_dir / "20260101_120000"
-        ts_dir.mkdir(parents=True)
-
-        wav_file = data_dir / "Music" / "song.wav"
-        wav_file.parent.mkdir(parents=True)
-        wav_file.write_bytes(b"wav data")
-
-        mp3_backup = ts_dir / "song.mp3"
-        mp3_backup.write_bytes(b"original mp3")
-        mp3_original = data_dir / "Music" / "song.mp3"
-
-        manifest = {
-            "timestamp": "2026-01-01T12:00:00",
-            "game_data_dir": str(data_dir),
-            "changes": [
-                {
-                    "type": "mp3_to_wav",
-                    "original": str(mp3_original),
-                    "new_file": str(wav_file),
-                    "backup": str(mp3_backup),
-                }
-            ],
-        }
-        (ts_dir / "manifest.json").write_text(
-            json.dumps(manifest), encoding="utf-8"
-        )
-
-        logger = Logger()
-        ok = rollback(backup_dir, data_dir, logger)
-
-        assert ok is True
-        assert not wav_file.exists()
-        assert mp3_original.exists()
-        assert mp3_original.read_bytes() == b"original mp3"
+        assert ini_file.read_text(encoding="utf-8") == "original content"
 
     def test_rollback_no_backup(self, tmp_path):
         logger = Logger()
         ok = rollback(tmp_path / "nonexistent", tmp_path, logger)
+        assert ok is False
+
+    def test_rollback_no_manifest(self, tmp_path):
+        backup_dir = tmp_path / "backup"
+        ts_dir = backup_dir / "20260101_120000"
+        ts_dir.mkdir(parents=True)
+
+        logger = Logger()
+        ok = rollback(backup_dir, tmp_path, logger)
         assert ok is False

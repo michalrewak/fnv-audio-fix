@@ -1,7 +1,6 @@
 """Tests for CLI argument parsing and entry point."""
 
-import sys
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 from pathlib import Path
 
 import pytest
@@ -46,13 +45,20 @@ class TestMainErrors:
             main(["--game-dir", "/nonexistent"])
         assert exc_info.value.code == 1
 
+
+class TestMainDryRun:
     @patch("fnv_audio_fix.cli.find_game_data_dir")
-    @patch("fnv_audio_fix.cli.check_ffmpeg", return_value=False)
-    def test_exit_if_no_ffmpeg(self, mock_ffmpeg, mock_find, tmp_path):
+    def test_dry_run_succeeds(self, mock_find, tmp_path):
         data = tmp_path / "Data"
         data.mkdir()
+        default_ini = tmp_path / "Fallout_default.ini"
+        default_ini.write_text(
+            "[Audio]\niAudioCacheSize=2048\n", encoding="utf-8"
+        )
         mock_find.return_value = data
 
-        with pytest.raises(SystemExit) as exc_info:
-            main(["--game-dir", str(tmp_path)])
-        assert exc_info.value.code == 1
+        # dry-run should not raise
+        main(["--game-dir", str(tmp_path), "--dry-run"])
+
+        # Original should be unchanged
+        assert "2048" in default_ini.read_text(encoding="utf-8")

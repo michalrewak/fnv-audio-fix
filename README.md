@@ -1,36 +1,39 @@
 # FNV Audio Fix
 
-**Fix audio crackling in Fallout: New Vegas** by converting MP3/OGG files to 16-bit PCM WAV.
+**Fix audio crackling in Fallout: New Vegas** by patching INI audio buffer settings.
 
-Works with modded games — safely skips Polish dubbing and other voice mods.
+Uses the [Viva New Vegas](https://vivanewvegas.moddinglinked.com/) recommended audio configuration.
 
 ## The Problem
 
-Fallout: New Vegas's audio engine (DirectSound) has well-known issues:
+Fallout: New Vegas has well-known audio issues:
 
-- **MP3 files** cause crackling/popping, especially on radio stations and the main menu
-- **OGG Vorbis** sound effects inside BSA archives can cause stuttering
-- This affects both vanilla and modded installations
+- **Crackling/popping** on radio stations, the main menu, and during gameplay
+- **Audio stuttering** with many sounds playing simultaneously
 
-Based on the same approach as [FNV BSA Decompressor](https://www.nexusmods.com/newvegas/mods/65854),
-but works reliably with heavily modded games where that tool may fail.
+These are caused by the game's default audio buffer settings being too small and single-threaded audio processing.
 
-## What It Does
+## The Fix
 
-| Phase | Action | Files |
-|-------|--------|-------|
-| **1** | Converts loose MP3 files (radio songs, music) to WAV | `Data/Sound/songs/`, `Data/Music/` |
-| **2** | Extracts OGG from Sound BSAs as loose WAV files | `Fallout - Sound.bsa`, DLC Sound BSAs |
+This tool applies the community-recommended audio settings from the Viva New Vegas modding guide:
 
-- Creates timestamped **backups** of all original files
-- **Rollback** support to undo everything in one command
-- **Dry-run** mode to preview changes
-- Skips voice/mod BSAs (Voxalter, Voices_pl, etc.)
+| Setting | Default | Fixed | Purpose |
+|---------|---------|-------|---------|
+| `iAudioCacheSize` | 2048 | **16384** | Larger audio buffer prevents crackling |
+| `iMaxSizeForCachedSound` | 256 | **2048** | Cache larger sound files |
+| `bMultiThreadAudio` | 0 | **1** | Enable multi-threaded audio processing |
+| `bUseAudioDebugInformation` | 1 | **0** | Disable debug overhead |
+
+Settings are applied to all three INI files:
+- `Fallout_default.ini` (game root - overwrites Fallout.ini on launch)
+- `Fallout.ini` (user settings in Documents)
+- `FalloutPrefs.ini` (user preferences in Documents)
 
 ## Requirements
 
-- **Python 3.8+** — [python.org/downloads](https://www.python.org/downloads/)
-- **FFmpeg** — install with `winget install Gyan.FFmpeg` or download from [gyan.dev](https://www.gyan.dev/ffmpeg/builds/)
+- **Python 3.8+** - [python.org/downloads](https://www.python.org/downloads/)
+
+No external dependencies (no FFmpeg needed).
 
 ## Installation
 
@@ -90,11 +93,12 @@ fnv-audio-fix -y
 
 ## How It Works
 
-1. **Phase 1** scans `Data/Sound/` and `Data/Music/` for loose `.mp3` files, backs them up, converts each to `.wav` using FFmpeg, then removes the original MP3 (the game picks up the WAV automatically).
+1. Finds your FNV installation (Steam auto-detection or `--game-dir`)
+2. Backs up all INI files before modification
+3. Patches audio settings in `Fallout_default.ini`, `Fallout.ini`, and `FalloutPrefs.ini`
+4. Stores a manifest for easy rollback
 
-2. **Phase 2** reads the file list from each Sound BSA archive (Bethesda's v104 format), finds `.ogg` and `.mp3` entries, extracts them, converts to WAV, and writes them as loose files. FNV loads loose files over BSA contents, so the BSA stays untouched.
-
-3. **Backups** are stored in `<game root>/AudioFixBackup/<timestamp>/` with a `manifest.json` that tracks every change for rollback.
+Backups are stored in `<game root>/AudioFixBackup/<timestamp>/` with a `manifest.json`.
 
 ## Game Path Detection
 
@@ -116,6 +120,10 @@ cd fnv-audio-fix
 pip install -e ".[dev]"
 pytest
 ```
+
+## Credits
+
+Audio fix settings from the [Viva New Vegas](https://vivanewvegas.moddinglinked.com/utilities.html) modding guide.
 
 ## License
 
