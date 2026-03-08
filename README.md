@@ -41,7 +41,7 @@ pip install fnv-audio-fix
 Or install from source:
 
 ```bash
-git clone https://github.com/mikemadest/fnv-audio-fix.git
+git clone https://github.com/michalrewak/fnv-audio-fix.git
 cd fnv-audio-fix
 pip install .
 ```
@@ -111,7 +111,7 @@ Use `--game-dir` if your installation is elsewhere.
 ## Development
 
 ```bash
-git clone https://github.com/mikemadest/fnv-audio-fix.git
+git clone https://github.com/michalrewak/fnv-audio-fix.git
 cd fnv-audio-fix
 pip install -e ".[dev]"
 pytest

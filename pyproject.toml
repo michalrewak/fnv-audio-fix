@@ -36,9 +36,9 @@ dev = ["pytest>=7"]
 fnv-audio-fix = "fnv_audio_fix.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/mikemadest/fnv-audio-fix"
-Repository = "https://github.com/mikemadest/fnv-audio-fix"
-Issues = "https://github.com/mikemadest/fnv-audio-fix/issues"
+Homepage = "https://github.com/michalrewak/fnv-audio-fix"
+Repository = "https://github.com/michalrewak/fnv-audio-fix"
+Issues = "https://github.com/michalrewak/fnv-audio-fix/issues"
 
 [tool.setuptools.packages.find]
 where = ["src"]
