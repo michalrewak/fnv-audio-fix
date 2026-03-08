@@ -1,10 +1,8 @@
-"""Core fix logic: Phase 1 (loose MP3), Phase 2 (BSA OGG), Phase 3 (INI patch)."""
+"""Core fix logic: Phase 1 (loose MP3), Phase 2 (BSA OGG)."""
 
 import os
-import re
 import shutil
 import json
-import stat
 from pathlib import Path
 from datetime import datetime
 
@@ -69,7 +67,11 @@ def save_manifest(backup_root, changes, game_data_dir, logger):
 
 def phase1_loose_mp3(game_data_dir, logger, backup_root, changes,
                      dry_run=False):
-    """Convert loose MP3 files (radio songs, music) to 16-bit PCM WAV.
+    """Convert loose MP3 files to 16-bit PCM WAV content, keeping .mp3 extension.
+
+    The game's ESM data references music/radio files by exact path including
+    the .mp3 extension, while the engine detects audio format from file headers.
+    We replace MP3 content with WAV PCM content but keep the .mp3 filename.
 
     Returns:
         Dict with keys: converted, failed, skipped.
@@ -79,11 +81,11 @@ def phase1_loose_mp3(game_data_dir, logger, backup_root, changes,
     logger.log("=" * 60)
 
     search_dirs = []
-    radio_dir = game_data_dir / "Sound" / "songs" / "radionv"
+    songs_dir = game_data_dir / "Sound" / "Songs"
     music_dir = game_data_dir / "Music"
 
-    if radio_dir.exists():
-        search_dirs.append(("Radio songs", radio_dir))
+    if songs_dir.exists():
+        search_dirs.append(("Radio songs", songs_dir))
     if music_dir.exists():
         search_dirs.append(("Music tracks", music_dir))
 
@@ -98,12 +100,17 @@ def phase1_loose_mp3(game_data_dir, logger, backup_root, changes,
 
         for mp3_path in mp3_files:
             rel_path = mp3_path.relative_to(game_data_dir)
-            wav_path = mp3_path.with_suffix(".wav")
 
-            if wav_path.exists():
-                logger.log(f"    SKIP (WAV exists): {rel_path}")
-                stats["skipped"] += 1
-                continue
+            # Skip if already converted (RIFF header = WAV content)
+            try:
+                with open(mp3_path, "rb") as f:
+                    header = f.read(4)
+                if header == b"RIFF":
+                    logger.log(f"    SKIP (already WAV): {rel_path}")
+                    stats["skipped"] += 1
+                    continue
+            except OSError:
+                pass
 
             if dry_run:
                 logger.log(f"    [DRY RUN] Would convert: {rel_path}")
@@ -112,21 +119,23 @@ def phase1_loose_mp3(game_data_dir, logger, backup_root, changes,
 
             _create_backup(mp3_path, backup_root, game_data_dir, logger)
 
+            # Convert to temp file, then replace original (keep .mp3 extension)
+            tmp_path = mp3_path.with_suffix(".wav.tmp")
             logger.log(f"    Converting: {rel_path}")
-            if convert_audio_file(mp3_path, wav_path, WAV_SAMPLE_RATE, logger):
-                wav_size = wav_path.stat().st_size
+            if convert_audio_file(mp3_path, tmp_path, WAV_SAMPLE_RATE, logger):
+                wav_size = tmp_path.stat().st_size
                 mp3_size = mp3_path.stat().st_size
                 logger.log(
-                    f"    OK: {mp3_path.name} -> .wav "
+                    f"    OK: {mp3_path.name} "
                     f"({mp3_size // 1024}KB -> {wav_size // 1024}KB)"
                 )
                 mp3_path.unlink()
+                tmp_path.rename(mp3_path)
                 stats["converted"] += 1
                 changes.append(
                     {
-                        "type": "mp3_to_wav",
-                        "original": str(mp3_path),
-                        "new_file": str(wav_path),
+                        "type": "mp3_rewrite",
+                        "file": str(mp3_path),
                         "backup": str(
                             backup_root
                             / mp3_path.relative_to(game_data_dir.parent)
@@ -135,6 +144,8 @@ def phase1_loose_mp3(game_data_dir, logger, backup_root, changes,
                 )
             else:
                 stats["failed"] += 1
+                if tmp_path.exists():
+                    tmp_path.unlink()
                 logger.log(f"    FAILED: {rel_path}", "ERROR")
 
     logger.log(
@@ -148,15 +159,17 @@ def phase1_loose_mp3(game_data_dir, logger, backup_root, changes,
 
 def phase2_bsa_ogg(game_data_dir, logger, backup_root, changes,
                    dry_run=False):
-    """Extract OGG/MP3 from Sound BSAs as loose WAV files.
+    """Extract OGG/MP3 from Sound BSAs as loose files with WAV content.
 
-    Loose files override BSA contents so the original BSA stays intact.
+    Files keep their original extension (.ogg/.mp3) so they override BSA
+    contents when the engine looks up by path.  The engine detects the actual
+    audio format from the RIFF header.
 
     Returns:
         Dict with keys: converted, failed, skipped, bsa_processed.
     """
     logger.log("\n" + "=" * 60)
-    logger.log("PHASE 2: Extracting OGG from BSAs as loose WAV files")
+    logger.log("PHASE 2: Extracting audio from BSAs as loose WAV overrides")
     logger.log("=" * 60)
 
     bsa_files = sorted(game_data_dir.glob("*.bsa"))
@@ -200,19 +213,19 @@ def phase2_bsa_ogg(game_data_dir, logger, backup_root, changes,
 
         for file_rec in audio_files:
             ext = os.path.splitext(file_rec["name"])[1].lower()
-            wav_name = os.path.splitext(file_rec["name"])[0] + ".wav"
+            loose_name = file_rec["name"]
             folder_path = file_rec["folder"].replace("\\", os.sep)
             loose_dir = game_data_dir / folder_path
-            wav_path = loose_dir / wav_name
+            loose_path = loose_dir / loose_name
             rel_display = file_rec["folder"] + "\\" + file_rec["name"]
 
-            if wav_path.exists():
+            if loose_path.exists():
                 stats["skipped"] += 1
                 continue
 
             if dry_run:
                 logger.log(
-                    f"    [DRY RUN] Would extract: {rel_display} -> {wav_name}"
+                    f"    [DRY RUN] Would extract: {rel_display}"
                 )
                 stats["converted"] += 1
                 continue
@@ -235,19 +248,19 @@ def phase2_bsa_ogg(game_data_dir, logger, backup_root, changes,
                 continue
 
             loose_dir.mkdir(parents=True, exist_ok=True)
-            with open(wav_path, "wb") as f:
+            with open(loose_path, "wb") as f:
                 f.write(wav_data)
 
             stats["converted"] += 1
             logger.log(
-                f"    OK: {rel_display} -> loose WAV ({len(wav_data) // 1024}KB)"
+                f"    OK: {rel_display} -> loose override ({len(wav_data) // 1024}KB)"
             )
             changes.append(
                 {
-                    "type": "bsa_extract_wav",
+                    "type": "bsa_extract",
                     "bsa": bsa_name,
                     "bsa_path": rel_display,
-                    "extracted_to": str(wav_path),
+                    "extracted_to": str(loose_path),
                 }
             )
 
@@ -256,108 +269,6 @@ def phase2_bsa_ogg(game_data_dir, logger, backup_root, changes,
         f"{stats['converted']} extracted, {stats['failed']} failed, "
         f"{stats['skipped']} skipped"
     )
-    return stats
-
-
-# ---- Phase 3: INI patching --------------------------------------------------
-
-def _find_fnv_ini_dir():
-    """Find the FNV user settings directory (My Games\\FalloutNV)."""
-    docs = Path(os.path.expanduser("~")) / "Documents" / "My Games" / "FalloutNV"
-    if docs.exists():
-        return docs
-    return None
-
-
-def _patch_ini_file(ini_path, logger, backup_root, changes, dry_run):
-    """Patch one INI file: replace .mp3 references with .wav for music."""
-    if not ini_path.exists():
-        return False
-
-    content = ini_path.read_text(encoding="utf-8", errors="replace")
-    original = content
-
-    # SMainMenuMusicTrack=special\maintitle.mp3 -> .wav
-    content = re.sub(
-        r"(SMainMenuMusicTrack=.*?)\.mp3",
-        r"\1.wav",
-        content,
-        flags=re.IGNORECASE,
-    )
-
-    # Music file references in cache lists:
-    #   Data\Music\Special\MainTitle.mp3 -> .wav
-    #   Data\Music\Base\*.mp3 -> *.wav
-    content = re.sub(
-        r"(Data\\Music\\[^,\r\n]*?)\.mp3",
-        r"\1.wav",
-        content,
-        flags=re.IGNORECASE,
-    )
-
-    if content == original:
-        logger.log(f"    No changes needed: {ini_path.name}")
-        return False
-
-    if dry_run:
-        logger.log(f"    [DRY RUN] Would patch: {ini_path.name}")
-        return True
-
-    # Backup the INI
-    _create_backup(ini_path, backup_root, ini_path.parent.parent.parent, logger)
-
-    # Handle read-only files
-    was_readonly = not os.access(ini_path, os.W_OK)
-    if was_readonly:
-        ini_path.chmod(ini_path.stat().st_mode | stat.S_IWRITE)
-
-    ini_path.write_text(content, encoding="utf-8")
-
-    if was_readonly:
-        ini_path.chmod(ini_path.stat().st_mode & ~stat.S_IWRITE)
-
-    changes.append({
-        "type": "ini_patch",
-        "file": str(ini_path),
-        "backup": str(
-            backup_root
-            / ini_path.relative_to(ini_path.parent.parent.parent)
-        ),
-    })
-    logger.log(f"    Patched: {ini_path.name}")
-    return True
-
-
-def phase3_patch_ini(logger, backup_root, changes, dry_run=False):
-    """Patch FNV INI files so the game finds .wav music instead of .mp3.
-
-    Returns:
-        Dict with keys: patched, skipped.
-    """
-    logger.log("\n" + "=" * 60)
-    logger.log("PHASE 3: Patching INI files (music .mp3 -> .wav references)")
-    logger.log("=" * 60)
-
-    stats = {"patched": 0, "skipped": 0}
-    ini_dir = _find_fnv_ini_dir()
-
-    if ini_dir is None:
-        logger.log("  Could not find FNV settings directory "
-                    "(Documents\\My Games\\FalloutNV).", "WARN")
-        stats["skipped"] = 1
-        return stats
-
-    logger.log(f"  INI directory: {ini_dir}")
-
-    for ini_name in ("Fallout.ini", "FalloutPrefs.ini"):
-        ini_path = ini_dir / ini_name
-        if _patch_ini_file(ini_path, logger, backup_root, changes, dry_run):
-            stats["patched"] += 1
-        else:
-            stats["skipped"] += 1
-
-    logger.log(f"\n  Phase 3 done: {stats['patched']} patched, "
-               f"{stats['skipped']} skipped")
     return stats
 
 
@@ -394,7 +305,20 @@ def rollback(backup_dir, game_data_dir, logger):
     removed = 0
 
     for change in manifest["changes"]:
-        if change["type"] == "mp3_to_wav":
+        ctype = change["type"]
+
+        if ctype == "mp3_rewrite":
+            # Restore original MP3 content from backup
+            backup_path = Path(change["backup"])
+            file_path = Path(change["file"])
+            if backup_path.exists():
+                file_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(backup_path, file_path)
+                restored += 1
+                logger.log(f"  Restored: {file_path.name}")
+
+        elif ctype == "mp3_to_wav":
+            # Legacy manifest format (v1): remove WAV, restore MP3
             wav_path = Path(change["new_file"])
             if wav_path.exists():
                 wav_path.unlink()
@@ -408,7 +332,7 @@ def rollback(backup_dir, game_data_dir, logger):
                 restored += 1
                 logger.log(f"  Restored: {original_path.name}")
 
-        elif change["type"] == "bsa_extract_wav":
+        elif ctype in ("bsa_extract", "bsa_extract_wav"):
             extracted = Path(change["extracted_to"])
             if extracted.exists():
                 extracted.unlink()
@@ -423,19 +347,6 @@ def rollback(backup_dir, game_data_dir, logger):
                     parent = parent.parent
             except (OSError, StopIteration):
                 pass
-
-        elif change["type"] == "ini_patch":
-            ini_path = Path(change["file"])
-            backup_path = Path(change["backup"])
-            if backup_path.exists() and ini_path.exists():
-                was_readonly = not os.access(ini_path, os.W_OK)
-                if was_readonly:
-                    ini_path.chmod(ini_path.stat().st_mode | stat.S_IWRITE)
-                shutil.copy2(backup_path, ini_path)
-                if was_readonly:
-                    ini_path.chmod(ini_path.stat().st_mode & ~stat.S_IWRITE)
-                restored += 1
-                logger.log(f"  Restored INI: {ini_path.name}")
 
     logger.log(
         f"\nRollback complete: {restored} files restored, {removed} files removed"

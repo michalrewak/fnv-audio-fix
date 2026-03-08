@@ -10,8 +10,6 @@ from fnv_audio_fix.fixer import (
     should_skip_bsa,
     save_manifest,
     phase1_loose_mp3,
-    phase3_patch_ini,
-    _patch_ini_file,
     rollback,
     SOUND_BSA_NAMES,
 )
@@ -72,13 +70,13 @@ class TestPhase1DryRun:
         assert (music / "song1.mp3").exists()
         assert (music / "song2.mp3").exists()
 
-    def test_skips_existing_wav(self, tmp_path):
+    def test_skips_already_converted(self, tmp_path):
         data_dir = tmp_path / "Data"
         music = data_dir / "Music"
         music.mkdir(parents=True)
 
-        (music / "song.mp3").write_bytes(b"fake mp3")
-        (music / "song.wav").write_bytes(b"fake wav")
+        # File with RIFF header = already converted to WAV content
+        (music / "song.mp3").write_bytes(b"RIFF" + b"\x00" * 40)
 
         logger = Logger()
         stats = phase1_loose_mp3(data_dir, logger, tmp_path, [],
@@ -88,22 +86,58 @@ class TestPhase1DryRun:
 
 
 class TestRollback:
-    def test_rollback_mp3(self, tmp_path):
-        """Rollback should restore MP3 and remove WAV."""
+    def test_rollback_mp3_rewrite(self, tmp_path):
+        """Rollback should restore original MP3 content from backup."""
         data_dir = tmp_path / "game" / "Data"
         data_dir.mkdir(parents=True)
         backup_dir = tmp_path / "backup"
         ts_dir = backup_dir / "20260101_120000"
         ts_dir.mkdir(parents=True)
 
-        # Simulate: original MP3 was backed up, WAV was created
+        # Simulate: original MP3 was backed up, file now has WAV content
+        mp3_file = data_dir / "Music" / "song.mp3"
+        mp3_file.parent.mkdir(parents=True)
+        mp3_file.write_bytes(b"RIFF wav content")
+
+        mp3_backup = ts_dir / "song.mp3"
+        mp3_backup.write_bytes(b"original mp3")
+
+        manifest = {
+            "timestamp": "2026-01-01T12:00:00",
+            "game_data_dir": str(data_dir),
+            "changes": [
+                {
+                    "type": "mp3_rewrite",
+                    "file": str(mp3_file),
+                    "backup": str(mp3_backup),
+                }
+            ],
+        }
+        (ts_dir / "manifest.json").write_text(
+            json.dumps(manifest), encoding="utf-8"
+        )
+
+        logger = Logger()
+        ok = rollback(backup_dir, data_dir, logger)
+
+        assert ok is True
+        assert mp3_file.exists()
+        assert mp3_file.read_bytes() == b"original mp3"
+
+    def test_rollback_legacy_mp3_to_wav(self, tmp_path):
+        """Rollback should handle legacy v1 manifest format."""
+        data_dir = tmp_path / "game" / "Data"
+        data_dir.mkdir(parents=True)
+        backup_dir = tmp_path / "backup"
+        ts_dir = backup_dir / "20260101_120000"
+        ts_dir.mkdir(parents=True)
+
         wav_file = data_dir / "Music" / "song.wav"
         wav_file.parent.mkdir(parents=True)
         wav_file.write_bytes(b"wav data")
 
         mp3_backup = ts_dir / "song.mp3"
         mp3_backup.write_bytes(b"original mp3")
-
         mp3_original = data_dir / "Music" / "song.mp3"
 
         manifest = {
@@ -134,120 +168,3 @@ class TestRollback:
         logger = Logger()
         ok = rollback(tmp_path / "nonexistent", tmp_path, logger)
         assert ok is False
-
-
-class TestPatchIniFile:
-    SAMPLE_INI = (
-        "[General]\r\n"
-        "sEssentialFileCacheList=Data\\Fallout.esm, Data\\Music\\Special\\"
-        "MainTitle.mp3, Data\\Fallout - Sound.bsa\r\n"
-        "sUnessentialFileCacheList=Data\\Music\\Base\\*.mp3, "
-        "Data\\Music\\Battle\\*.mp3, Data\\Music\\Explore\\*.mp3\r\n"
-        "[Display]\r\n"
-        "iSize W=1920\r\n"
-        "SMainMenuMusicTrack=special\\maintitle.mp3\r\n"
-        "[Audio]\r\n"
-        "SFileTypeSource=wav\r\n"
-    )
-
-    def test_patches_mp3_to_wav(self, tmp_path):
-        ini_path = tmp_path / "Fallout.ini"
-        ini_path.write_text(self.SAMPLE_INI, encoding="utf-8")
-
-        logger = Logger()
-        backup_root = tmp_path / "backup"
-        backup_root.mkdir()
-        changes = []
-
-        result = _patch_ini_file(ini_path, logger, backup_root, changes,
-                                  dry_run=False)
-
-        assert result is True
-        content = ini_path.read_text(encoding="utf-8")
-        assert "MainTitle.wav" in content
-        assert "maintitle.wav" in content
-        assert "*.wav" in content
-        # Ensure non-music .mp3 references remain unchanged
-        assert "SFileTypeSource=wav" in content
-        # Should not contain .mp3 in music lines
-        assert "MainTitle.mp3" not in content
-        assert "maintitle.mp3" not in content
-        assert len(changes) == 1
-        assert changes[0]["type"] == "ini_patch"
-
-    def test_dry_run_no_writes(self, tmp_path):
-        ini_path = tmp_path / "Fallout.ini"
-        ini_path.write_text(self.SAMPLE_INI, encoding="utf-8")
-        original_bytes = ini_path.read_bytes()
-
-        logger = Logger()
-        changes = []
-
-        result = _patch_ini_file(ini_path, logger, tmp_path, changes,
-                                  dry_run=True)
-
-        assert result is True
-        # File should be unchanged (compare raw bytes)
-        assert ini_path.read_bytes() == original_bytes
-        assert len(changes) == 0
-
-    def test_no_changes_needed(self, tmp_path):
-        ini_path = tmp_path / "clean.ini"
-        ini_path.write_text(
-            "[Audio]\r\nSMainMenuMusicTrack=special\\maintitle.wav\r\n",
-            encoding="utf-8",
-        )
-
-        logger = Logger()
-        result = _patch_ini_file(ini_path, logger, tmp_path, [], dry_run=False)
-        assert result is False
-
-    def test_handles_readonly(self, tmp_path):
-        import stat
-        ini_path = tmp_path / "Fallout.ini"
-        ini_path.write_text(self.SAMPLE_INI, encoding="utf-8")
-        ini_path.chmod(ini_path.stat().st_mode & ~stat.S_IWRITE)
-
-        logger = Logger()
-        backup_root = tmp_path / "backup"
-        backup_root.mkdir()
-        changes = []
-
-        result = _patch_ini_file(ini_path, logger, backup_root, changes,
-                                  dry_run=False)
-        assert result is True
-        assert "maintitle.wav" in ini_path.read_text(encoding="utf-8")
-
-
-class TestPhase3PatchIni:
-    def test_phase3_finds_and_patches(self, tmp_path):
-        ini_dir = tmp_path / "Documents" / "My Games" / "FalloutNV"
-        ini_dir.mkdir(parents=True)
-        ini_content = (
-            "SMainMenuMusicTrack=special\\maintitle.mp3\r\n"
-            "sEssentialFileCacheList=Data\\Music\\Special\\MainTitle.mp3\r\n"
-        )
-        (ini_dir / "Fallout.ini").write_text(ini_content, encoding="utf-8")
-        (ini_dir / "FalloutPrefs.ini").write_text(ini_content, encoding="utf-8")
-
-        logger = Logger()
-        backup_root = tmp_path / "backup"
-        backup_root.mkdir()
-        changes = []
-
-        with patch("fnv_audio_fix.fixer._find_fnv_ini_dir",
-                    return_value=ini_dir):
-            stats = phase3_patch_ini(logger, backup_root, changes,
-                                      dry_run=False)
-
-        assert stats["patched"] == 2
-        assert stats["skipped"] == 0
-        assert len(changes) == 2
-
-    def test_phase3_no_ini_dir(self):
-        logger = Logger()
-        with patch("fnv_audio_fix.fixer._find_fnv_ini_dir",
-                    return_value=None):
-            stats = phase3_patch_ini(logger, Path("/fake"), [], dry_run=False)
-
-        assert stats["skipped"] == 1

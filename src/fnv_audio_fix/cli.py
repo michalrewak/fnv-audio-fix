@@ -11,7 +11,6 @@ from .fixer import (
     SOUND_BSA_NAMES,
     phase1_loose_mp3,
     phase2_bsa_ogg,
-    phase3_patch_ini,
     rollback,
     save_manifest,
     should_skip_bsa,
@@ -116,9 +115,9 @@ def main(argv=None):
         logger.log("*** DRY RUN MODE — no files will be modified ***")
 
     # Scan
-    mp3_radio = (
-        sorted((game_data_dir / "Sound").rglob("*.mp3"))
-        if (game_data_dir / "Sound").exists()
+    mp3_songs = (
+        sorted((game_data_dir / "Sound" / "Songs").rglob("*.mp3"))
+        if (game_data_dir / "Sound" / "Songs").exists()
         else []
     )
     mp3_music = (
@@ -129,7 +128,7 @@ def main(argv=None):
     bsa_files = sorted(game_data_dir.glob("*.bsa"))
 
     logger.log(f"\nFound:")
-    logger.log(f"  {len(mp3_radio)} loose MP3 radio songs")
+    logger.log(f"  {len(mp3_songs)} loose MP3 radio songs")
     logger.log(f"  {len(mp3_music)} loose MP3 music tracks")
     logger.log(f"  {len(bsa_files)} BSA archives")
 
@@ -159,12 +158,11 @@ def main(argv=None):
         if not skip and is_sound:
             total_ogg_in_bsa += ogg
 
-    total_mp3 = len(mp3_radio) + len(mp3_music)
+    total_mp3 = len(mp3_songs) + len(mp3_music)
 
     print(f"\nPlan:")
-    print(f"  Phase 1: Convert {total_mp3} loose MP3 files -> WAV")
-    print(f"  Phase 2: Extract {total_ogg_in_bsa} OGG files from BSAs -> WAV")
-    print(f"  Phase 3: Patch INI files (music .mp3 -> .wav references)")
+    print(f"  Phase 1: Convert {total_mp3} loose MP3 files (keep .mp3 extension)")
+    print(f"  Phase 2: Extract {total_ogg_in_bsa} OGG files from BSAs (keep .ogg extension)")
     print(f"  Backups: {backup_root}")
     if args.dry_run:
         print("  *** DRY RUN — no changes will be made ***")
@@ -182,7 +180,6 @@ def main(argv=None):
                            args.dry_run)
     p2 = phase2_bsa_ogg(game_data_dir, logger, backup_root, changes,
                           args.dry_run)
-    p3 = phase3_patch_ini(logger, backup_root, changes, args.dry_run)
 
     if not args.dry_run and changes:
         save_manifest(backup_root, changes, game_data_dir, logger)
@@ -191,12 +188,10 @@ def main(argv=None):
     logger.log("\n" + "=" * 60)
     logger.log("SUMMARY")
     logger.log("=" * 60)
-    logger.log(f"Phase 1 (MP3 -> WAV): {p1['converted']} converted, "
+    logger.log(f"Phase 1 (MP3 -> WAV content): {p1['converted']} converted, "
                f"{p1['failed']} failed, {p1['skipped']} skipped")
-    logger.log(f"Phase 2 (BSA OGG -> WAV): {p2['converted']} extracted, "
+    logger.log(f"Phase 2 (BSA -> loose WAV): {p2['converted']} extracted, "
                f"{p2['failed']} failed, {p2['skipped']} skipped")
-    logger.log(f"Phase 3 (INI patch): {p3['patched']} patched, "
-               f"{p3['skipped']} skipped")
     logger.log(f"Total changes: {len(changes)}")
 
     total_failures = p1["failed"] + p2["failed"]
